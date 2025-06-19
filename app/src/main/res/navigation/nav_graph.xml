@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/permissionFragment">
+
+    <fragment
+        android:id="@+id/permissionFragment"
+        android:name="com.example.positionme2.ui.permissions.PermissionRequestFragment"
+        android:label="Permission Request"
+        tools:layout="@layout/fragment_permission_request">
+        <action
+            android:id="@+id/action_permissionFragment_to_calibrationFragment"
+            app:destination="@id/calibrationFragment"
+            app:popUpTo="@id/permissionFragment"
+            app:popUpToInclusive="true" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/calibrationFragment"
+        android:name="com.example.positionme2.ui.compass.CompassCalibrationFragment"
+        android:label="Compass Calibration"
+        tools:layout="@layout/screen_compass_calibration">
+        <action
+            android:id="@+id/action_calibration_to_main"
+            app:destination="@id/mainFragment"
+            app:popUpTo="@id/calibrationFragment"
+            app:popUpToInclusive="true" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/mainFragment"
+        android:name="com.example.positionme2.ui.main.MainFragment"
+        android:label="Main Screen"
+        tools:layout="@layout/fragment_main" />
+
+</navigation>
