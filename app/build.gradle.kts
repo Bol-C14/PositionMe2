@@ -90,6 +90,9 @@ dependencies {
     implementation("com.google.maps.android:maps-compose:2.12.0")
     implementation("com.google.android.gms:play-services-maps:18.2.0")
 
+    // Google Play Services Location for system GPS
+    implementation("com.google.android.gms:play-services-location:21.2.0")
+
     // Hilt for DI
     implementation("com.google.dagger:hilt-android:2.51.1")
     kapt("com.google.dagger:hilt-compiler:2.51.1")
