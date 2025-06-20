@@ -1,0 +1,13 @@
+{
+  "buildingId": "buildingA",
+  "floor": 1,
+  "imageFile": "floorplan.png",
+  "imageBounds": {
+    "southwest": { "lat": 40.7128, "lng": -74.0060 },
+    "northeast": { "lat": 40.7138, "lng": -74.0050 }
+  },
+  "pois": [
+    { "lat": 40.7133, "lng": -74.0055, "title": "Entrance", "snippet": "Main entrance" }
+  ]
+}
+

@@ -15,19 +15,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.example.positionme2.domain.recording.RecordingService
 import com.example.positionme2.ui.map.engine.MapEngine
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.maps.android.compose.*
 import kotlinx.coroutines.launch
 
 @Composable
 fun MapView(
-    mapEngine: MapEngine
+    mapEngine: MapEngine,
+    recordingService: RecordingService
 ) {
     val currentPosition by mapEngine.currentPosition.collectAsState()
     val trajectories by mapEngine.trajectories.collectAsState()
     val regionsOfInterest by mapEngine.regionsOfInterest.collectAsState()
+    val indoorMap by mapEngine.indoorMap.collectAsState()
+
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(40.7128, -74.0060), 10f)
     }
@@ -59,6 +64,23 @@ fun MapView(
                     title = roi.name,
                     snippet = roi.description
                 )
+            }
+
+            indoorMap?.let { indoorMapData ->
+                indoorMapData.imageBounds?.let {
+                    GroundOverlay(
+                        position = GroundOverlayPosition.create(latLngBounds = it),
+                        image = BitmapDescriptorFactory.fromAsset(indoorMapData.imageUrl!!),
+                        transparency = 0.5f
+                    )
+                }
+                indoorMapData.pois.forEach { poi ->
+                    Marker(
+                        state = MarkerState(position = poi.position),
+                        title = poi.title,
+                        snippet = poi.snippet
+                    )
+                }
             }
         }
 

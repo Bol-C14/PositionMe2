@@ -16,6 +16,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.positionme2.data.repository.IndoorMapRepository
+import com.example.positionme2.domain.recording.RecordingService
+import com.example.positionme2.domain.sensor.SensorFusionService
 import com.example.positionme2.ui.compass.CompassCalibrationScreen
 import com.example.positionme2.ui.main.device.DeviceScreen
 import com.example.positionme2.ui.map.engine.GoogleMapEngine
@@ -27,6 +30,7 @@ import com.example.positionme2.ui.splash.SplashScreenWithViewModel
 import com.example.positionme2.ui.splash.SplashViewModel
 import com.example.positionme2.ui.permissions.PermissionScreen
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 @Composable
 fun CompassScreen() {
@@ -35,6 +39,14 @@ fun CompassScreen() {
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject
+    lateinit var sensorFusionService: SensorFusionService
+    @Inject
+    lateinit var indoorMapRepository: IndoorMapRepository
+    @Inject
+    lateinit var recordingService: RecordingService
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -78,17 +90,17 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("device") { DeviceScreen() }
                         composable("map") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity)
+                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
-                            ExploreScreen(mapEngine = mapEngine)
+                            ExploreScreen(mapEngine = mapEngine, recordingService = recordingService)
                         }
                         composable("record") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity)
+                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
                             RecordTrajectoryScreen(mapEngine = mapEngine)
                         }
                         composable("replay") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity)
+                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
                             ReplayTrajectoryScreen(mapEngine = mapEngine)
                         }
