@@ -22,9 +22,13 @@ import com.example.positionme2.domain.sensor.SensorFusionService
 import com.example.positionme2.ui.compass.CompassCalibrationScreen
 import com.example.positionme2.ui.main.device.DeviceScreen
 import com.example.positionme2.ui.map.engine.GoogleMapEngine
+import com.example.positionme2.ui.map.engine.adapter.FusedPositionProvider
+import com.example.positionme2.ui.map.engine.adapter.GnssPositionProvider
+import com.example.positionme2.ui.map.engine.adapter.PdrPositionProvider
 import com.example.positionme2.ui.map.features.explore.ExploreScreen
 import com.example.positionme2.ui.map.features.record.RecordTrajectoryScreen
 import com.example.positionme2.ui.map.features.replay.ReplayTrajectoryScreen
+import com.example.positionme2.ui.map.marker.OptimizedMarkerRegistry
 import com.example.positionme2.ui.theme.PositionMe2Theme
 import com.example.positionme2.ui.splash.SplashScreenWithViewModel
 import com.example.positionme2.ui.splash.SplashViewModel
@@ -46,6 +50,16 @@ class MainActivity : ComponentActivity() {
     lateinit var indoorMapRepository: IndoorMapRepository
     @Inject
     lateinit var recordingService: RecordingService
+    @Inject
+    lateinit var gnssPositionProvider: GnssPositionProvider
+    @Inject
+    lateinit var pdrPositionProvider: PdrPositionProvider
+    @Inject
+    lateinit var fusedPositionProvider: FusedPositionProvider
+    @Inject
+    lateinit var optimizedMarkerRegistry: OptimizedMarkerRegistry
+    @Inject
+    lateinit var mapEngine: GoogleMapEngine
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,19 +104,31 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("device") { DeviceScreen() }
                         composable("map") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
-                            ExploreScreen(mapEngine = mapEngine, recordingService = recordingService)
+                            ExploreScreen(
+                                mapEngine = mapEngine,
+                                recordingService = recordingService,
+                                sensorFusionService = sensorFusionService,
+                                markerRegistry = optimizedMarkerRegistry
+                            )
                         }
                         composable("record") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
-                            RecordTrajectoryScreen(mapEngine = mapEngine)
+                            RecordTrajectoryScreen(
+                                mapEngine = mapEngine,
+                                markerRegistry = optimizedMarkerRegistry,
+                                recordingService = recordingService,
+                                sensorFusionService = sensorFusionService
+                            )
                         }
                         composable("replay") {
-                            val mapEngine = GoogleMapEngine(this@MainActivity, sensorFusionService, indoorMapRepository)
                             mapEngine.startTracking()
-                            ReplayTrajectoryScreen(mapEngine = mapEngine)
+                            ReplayTrajectoryScreen(
+                                mapEngine = mapEngine,
+                                markerRegistry = optimizedMarkerRegistry,
+                                recordingService = recordingService,
+                                sensorFusionService = sensorFusionService
+                            )
                         }
                     }
                     // Debug buttons overlay

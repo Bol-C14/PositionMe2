@@ -22,67 +22,92 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CompassCalibration
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Save
+import androidx.core.content.ContextCompat
 
 @Composable
 fun PermissionScreen(onPermissionsGranted: () -> Unit = {}) {
     val context = LocalContext.current
-    val requiredPermissions = remember {
-        mutableListOf(
+
+    // Define and separate foreground and background permissions
+    val (foregroundPermissions, backgroundPermission) = remember {
+        val permissions = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.CAMERA,
-            Manifest.permission.READ_EXTERNAL_STORAGE
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.BODY_SENSORS,
+            Manifest.permission.HIGH_SAMPLING_RATE_SENSORS
         ).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(Manifest.permission.ACTIVITY_RECOGNITION)
+                add(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 remove(Manifest.permission.READ_EXTERNAL_STORAGE)
                 add(Manifest.permission.READ_MEDIA_IMAGES)
             }
         }
+        val background = permissions.find { it == Manifest.permission.ACCESS_BACKGROUND_LOCATION }
+        val foreground = permissions.filter { it != background }.toTypedArray()
+        foreground to background
     }
+
+    val allPermissions = remember { (foregroundPermissions.toList() + listOfNotNull(backgroundPermission)) }
     var showRationale by rememberSaveable { mutableStateOf(false) }
-    var allGranted by rememberSaveable { mutableStateOf(false) }
-    var missingPermissions by rememberSaveable { mutableStateOf(listOf<String>()) }
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (permissions.isEmpty()) {
-            showRationale = true
-            return@rememberLauncherForActivityResult
+    var rationaleText by rememberSaveable { mutableStateOf("") }
+    var missingPermissions by rememberSaveable { mutableStateOf(allPermissions) }
+
+    val backgroundLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { isGranted ->
+            if (isGranted) {
+                onPermissionsGranted()
+            } else {
+                rationaleText = "Background location is required for full functionality. Please grant it from app settings."
+                showRationale = true
+            }
         }
-        allGranted = permissions.values.all { it }
-        if (!allGranted) {
-            showRationale = true
-            missingPermissions = permissions.filter { !it.value }.map { it.key }
-        } else {
-            onPermissionsGranted()
+    )
+
+    val foregroundLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+        onResult = { permissions ->
+            val allForegroundGranted = permissions.values.all { it }
+            if (allForegroundGranted) {
+                if (backgroundPermission != null && ContextCompat.checkSelfPermission(context, backgroundPermission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    backgroundLauncher.launch(backgroundPermission)
+                } else {
+                    onPermissionsGranted()
+                }
+            } else {
+                missingPermissions = permissions.filter { !it.value }.map { it.key }
+                rationaleText = "The app requires the following permissions to function correctly: ${missingPermissions.joinToString()}"
+                showRationale = true
+            }
         }
-    }
+    )
+
+    // Check initial permission status
     LaunchedEffect(Unit) {
-        val notGranted = requiredPermissions.filter {
-            androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        val notGranted = allPermissions.filter {
+            ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
         }
         if (notGranted.isEmpty()) {
-            allGranted = true
             onPermissionsGranted()
         } else {
-            allGranted = false
             missingPermissions = notGranted
         }
     }
+
     if (showRationale) {
         AlertDialog(
             onDismissRequest = { showRationale = false },
             title = { Text("Permissions Required") },
-            text = {
-                Text("This app needs location, camera, and storage permissions to function.\nMissing: ${missingPermissions.joinToString()}" )
-            },
+            text = { Text(rationaleText) },
             confirmButton = {
                 TextButton(onClick = {
                     showRationale = false
-                    permissionLauncher.launch(requiredPermissions.toTypedArray())
+                    foregroundLauncher.launch(foregroundPermissions)
                 }) { Text("Grant Again") }
             },
             dismissButton = {
@@ -90,6 +115,7 @@ fun PermissionScreen(onPermissionsGranted: () -> Unit = {}) {
             }
         )
     }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -153,7 +179,7 @@ fun PermissionScreen(onPermissionsGranted: () -> Unit = {}) {
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = {
-                permissionLauncher.launch(requiredPermissions.toTypedArray())
+                foregroundLauncher.launch(foregroundPermissions)
             },
             modifier = Modifier
                 .fillMaxWidth()

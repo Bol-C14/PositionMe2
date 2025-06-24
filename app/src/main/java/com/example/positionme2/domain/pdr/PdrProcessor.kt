@@ -11,318 +11,217 @@ import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * PDR Processing class
- *
- * This class implements the core PDR algorithms including:
- * - Step detection (if not provided by hardware sensor)
- * - Step length estimation using Weinberg algorithm
- * - Position calculation based on step detection and heading
- * - Elevation estimation
+ * Pedestrian-Dead-Reckoning processor.
  */
 @Singleton
 class PdrProcessor @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    companion object {
-        // Weinberg algorithm coefficient for stride calculations
-        private const val WEINBERG_K = 0.364f
 
-        // Number of samples to keep for elevation calculation
-        private const val ELEVATION_WINDOW = 4
+    /* ------------------------------------------------------------------ */
+    /* Helper to create a zero-initialised position (edit once if model   */
+    /* changes).                                                          */
+    /* ------------------------------------------------------------------ */
+    private fun zeroPos() = PdrPosition(
+        x          = 0f,
+        y          = 0f,
+        heading    = 0f,
+        stepLength = 0f,
+        timestamp  = 0L
+    )
 
-        // Number of samples for acceleration
-        private const val ACCEL_SAMPLES = 100
+    /* ---------- tunables ---------- */
 
-        // Movement thresholds
-        private const val MOVEMENT_THRESHOLD = 0.3f  // m/s^2
-        private const val EPSILON = 0.18f
-
-        // Min samples required for step length calculation
-        private const val MIN_REQUIRED_SAMPLES = 2
+    private companion object {
+        const val WEINBERG_K          = 0.43f      // stride coefficient (m)
+        const val MIN_REQUIRED_SAMPLES = 4
+        const val ACCEL_BUF_SIZE      = 100
+        const val ELEVATION_BUF_SIZE  = 4
+        const val MOVEMENT_THRESHOLD  = 0.30f
+        const val HORIZONTAL_EPSILON  = 0.18f
     }
 
-    // Current position
-    private val _pdrPosition = MutableLiveData(PdrPosition(0f, 0f, 0f))
-    val pdrPosition: LiveData<PdrPosition> = _pdrPosition
+    /* ---------- live data ---------- */
 
-    // Current step length
-    private var stepLength = 0.75f
+    private val _pdrPosition = MutableLiveData(zeroPos())
+    val pdrPosition: LiveData<PdrPosition> get() = _pdrPosition
 
-    // Current elevation
-    private var elevation = 0f
-    private val _elevationData = MutableLiveData(0f)
-    val elevationData: LiveData<Float> = _elevationData
+    private val _elevation  = MutableLiveData(0f)
+    val elevation: LiveData<Float> get() = _elevation
 
-    // Elevator detection
-    private val _isInElevator = MutableLiveData(false)
-    val isInElevator: LiveData<Boolean> = _isInElevator
+    private val _inElevator = MutableLiveData(false)
+    val inElevator: LiveData<Boolean> get() = _inElevator
 
-    // Floor detection
-    private var startElevation = 0f
-    private var currentFloor = 0
     private val _floorLevel = MutableLiveData(0)
-    val floorLevel: LiveData<Int> = _floorLevel
+    val floorLevel: LiveData<Int> get() = _floorLevel
 
-    // Configuration
-    private var floorHeight = 4
-    private var useManualStepLength = false
+    /* ---------- state ---------- */
 
-    // Step aggregation for analytics
-    private var sumStepLength = 0f
+    private var useManualStep = false
+    private var manualStepLen = 0.75f
+
+    private var relElevation  = 0f
+    private var refElevation  = 0f
+    private var floorHeight   = 4f           // metres
+    private var setupIndex    = 0            // first-3-sample median
+
+    private var stepSum   = 0f
     private var stepCount = 0
 
-    // Circular buffers for calculations
-    private val elevationBuffer = CircularBuffer<Float>(ELEVATION_WINDOW)
-    private val verticalAccelBuffer = CircularBuffer<Float>(ACCEL_SAMPLES)
-    private val horizontalAccelBuffer = CircularBuffer<Float>(ACCEL_SAMPLES)
-    private val initialElevationBuffer = Array<Float?>(3) { null }
-    private var setupIndex = 0
+    private val vertAccBuf = CircularBuffer<Float>(ACCEL_BUF_SIZE)
+    private val horiAccBuf = CircularBuffer<Float>(ACCEL_BUF_SIZE)
+    private val elevBuf    = CircularBuffer<Float>(ELEVATION_BUF_SIZE)
+    private val first3Elev = arrayOfNulls<Float>(3)
+
+    /* ---------- public API ---------- */
 
     /**
-     * Update PDR position based on step detection
-     *
-     * @param timestamp Time when step occurred
-     * @param accelMagnitudes List of acceleration magnitudes since last step
-     * @param headingRad Heading in radians
-     * @return Current position after update
+     * Call when *one* hardware step is detected.
      */
     fun updatePdrPosition(
         timestamp: Long,
-        accelMagnitudes: List<Float>,
+        accelMagn: List<Float>,
         headingRad: Float
     ): PdrPosition {
-        // Safety check for sufficient data
-        if (accelMagnitudes.size < MIN_REQUIRED_SAMPLES) {
-            return _pdrPosition.value ?: PdrPosition(0f, 0f, 0f)
-        }
 
-        // Convert heading (0 rad = North) to standard angle (0 rad = East)
-        val adaptedHeading = (Math.PI/2 - headingRad).toFloat()
+        if (accelMagn.size < MIN_REQUIRED_SAMPLES)
+            return _pdrPosition.value ?: zeroPos()
 
-        // Calculate step length if not using manual value
-        if (!useManualStepLength) {
-            stepLength = calculateStepLength(accelMagnitudes.map { it.toDouble() })
-        }
+        val stepLen = if (useManualStep) manualStepLen
+        else calculateStepLength(accelMagn.map(Float::toDouble))
 
-        // Update step aggregation
-        sumStepLength += stepLength
-        stepCount++
+        val dx = stepLen * sin(headingRad)   // East
+        val dy = stepLen * cos(headingRad)   // North
 
-        // Calculate position change
-        val deltaX = stepLength * cos(adaptedHeading)
-        val deltaY = stepLength * sin(adaptedHeading)
-
-        // Get current position
-        val currentPosition = _pdrPosition.value ?: PdrPosition(0f, 0f, 0f)
-
-        // Update position
-        val newPosition = currentPosition.copy(
-            x = currentPosition.x + deltaX,
-            y = currentPosition.y + deltaY,
-            heading = headingRad,
-            stepLength = stepLength,
-            timestamp = timestamp
+        val cur = _pdrPosition.value ?: zeroPos()
+        val newPos = cur.copy(
+            x          = cur.x + dx,
+            y          = cur.y + dy,
+            heading    = headingRad,
+            stepLength = stepLen,
+            timestamp  = timestamp
         )
+        _pdrPosition.postValue(newPos)
 
-        // Post update
-        _pdrPosition.postValue(newPosition)
+        stepSum   += stepLen
+        stepCount += 1
 
-        return newPosition
+        return newPos
     }
 
     /**
-     * Calculate step length using Weinberg algorithm
+     * Feed absolute barometric altitude in metres **ASL**.
      */
-    private fun calculateStepLength(accelMagnitudes: List<Double>): Float {
-        // Find min and max acceleration
-        val maxAccel = accelMagnitudes.maxOrNull() ?: return 0f
-        val minAccel = accelMagnitudes.minOrNull() ?: return 0f
+    fun updateElevation(absElev: Float): Float {
+        if (absElev !in -100f..10_000f) return relElevation
 
-        // Calculate bounce (fourth root of acceleration range)
-        val bounce = (maxAccel - minAccel).pow(0.25).toFloat()
-
-        // Apply Weinberg formula
-        return bounce * WEINBERG_K * 2
-    }
-
-    /**
-     * Update elevation based on barometric pressure
-     *
-     * @param absoluteElevation Absolute elevation in meters from sea level
-     * @return Relative elevation from start position
-     */
-    fun updateElevation(absoluteElevation: Float): Float {
-        // Filter invalid values
-        if (absoluteElevation < -100 || absoluteElevation > 10000) {
-            return elevation
-        }
-
-        // Initialize elevation reference
         if (setupIndex < 3) {
-            initialElevationBuffer[setupIndex] = absoluteElevation
-
-            if (setupIndex == 2) {
-                // Get median of first 3 values as reference
-                val validValues = initialElevationBuffer.filterNotNull()
-                if (validValues.size == 3) {
-                    startElevation = validValues.sorted()[1]
-                } else {
-                    startElevation = 0f
-                }
-            }
-
-            setupIndex++
+            first3Elev[setupIndex++] = absElev
+            if (setupIndex == 3)
+                refElevation = first3Elev.filterNotNull().sorted()[1]
             return 0f
         }
 
-        // Calculate relative elevation
-        elevation = absoluteElevation - startElevation
-        _elevationData.postValue(elevation)
+        relElevation = absElev - refElevation
+        _elevation.postValue(relElevation)
 
-        // Add to buffer for floor detection
-        elevationBuffer.add(absoluteElevation)
+        elevBuf.add(absElev)
+        if (elevBuf.isFull()) {
+            val avgElev = elevBuf.toList().average().toFloat()
+            val floors  = ((avgElev - refElevation) / floorHeight).roundToInt()
+            _floorLevel.postValue(floors)
+        }
+        return relElevation
+    }
 
-        // Detect floor changes
-        if (elevationBuffer.isFull()) {
-            val avgElevation = elevationBuffer.toList().average().toFloat()
+    /**
+     * Heuristic elevator detector.
+     */
+    fun estimateElevator(gravity: FloatArray, linAcc: FloatArray): Boolean {
+        val gMag  = SensorManager.STANDARD_GRAVITY
+        val gUnit = floatArrayOf(gravity[0] / gMag,
+            gravity[1] / gMag,
+            gravity[2] / gMag)
 
-            // Check if elevation change is significant enough for floor change
-            if (abs(avgElevation - startElevation) > floorHeight) {
-                currentFloor = ((avgElevation - startElevation) / floorHeight).toInt()
-                _floorLevel.postValue(currentFloor)
-            }
+        val dot = linAcc[0]*gUnit[0] + linAcc[1]*gUnit[1] + linAcc[2]*gUnit[2]
+        val vertAcc = abs(dot)
+
+        val hx = linAcc[0] - dot * gUnit[0]
+        val hy = linAcc[1] - dot * gUnit[1]
+        val hz = linAcc[2] - dot * gUnit[2]
+        val horiAcc = sqrt(hx*hx + hy*hy + hz*hz)
+
+        vertAccBuf.add(vertAcc)
+        horiAccBuf.add(horiAcc)
+
+        if (vertAccBuf.isFull() && horiAccBuf.isFull()) {
+            val vAvg = vertAccBuf.toList().average().toFloat()
+            val hAvg = horiAccBuf.toList().average().toFloat()
+            val inLift = hAvg < HORIZONTAL_EPSILON && vAvg > MOVEMENT_THRESHOLD
+            _inElevator.postValue(inLift)
+        }
+        return _inElevator.value ?: false
+    }
+
+    /** Average step length since last request. */
+    fun getAverageStepLength(): Float =
+        if (stepCount == 0) 0f else (stepSum / stepCount).also {
+            stepSum = 0f; stepCount = 0
         }
 
-        return elevation
-    }
-
-    /**
-     * Estimate if user is in elevator based on gravity and acceleration
-     */
-    fun estimateElevator(
-        gravity: FloatArray,
-        linearAcceleration: FloatArray
-    ): Boolean {
-        // Standard gravity
-        val g = SensorManager.STANDARD_GRAVITY
-
-        // Calculate vertical acceleration component (along gravity)
-        val verticalAcc = sqrt(
-            (linearAcceleration[0] * gravity[0]/g).pow(2) +
-            (linearAcceleration[1] * gravity[1]/g).pow(2) +
-            (linearAcceleration[2] * gravity[2]/g).pow(2)
-        )
-
-        // Calculate horizontal acceleration component (perpendicular to gravity)
-        val horizontalAcc = sqrt(
-            (linearAcceleration[0] * (1 - gravity[0]/g)).pow(2) +
-            (linearAcceleration[1] * (1 - gravity[1]/g)).pow(2) +
-            (linearAcceleration[2] * (1 - gravity[2]/g)).pow(2)
-        )
-
-        // Store in buffers
-        verticalAccelBuffer.add(verticalAcc)
-        horizontalAccelBuffer.add(horizontalAcc)
-
-        // Evaluate once buffers are full
-        if (verticalAccelBuffer.isFull() && horizontalAccelBuffer.isFull()) {
-            // Calculate average vertical acceleration magnitude
-            val verticalAvg = verticalAccelBuffer.toList().map { abs(it) }.average().toFloat()
-
-            // Calculate average horizontal acceleration magnitude
-            val horizontalAvg = horizontalAccelBuffer.toList().map { abs(it) }.average().toFloat()
-
-            // Elevator characteristic: minimal horizontal movement, significant vertical movement
-            val inElevator = horizontalAvg < EPSILON && verticalAvg > MOVEMENT_THRESHOLD
-            _isInElevator.postValue(inElevator)
-
-            return inElevator
-        }
-
-        return _isInElevator.value ?: false
-    }
-
-    /**
-     * Get average step length from aggregate data
-     */
-    fun getAverageStepLength(): Float {
-        if (stepCount == 0) return 0f
-
-        val average = sumStepLength / stepCount
-
-        // Reset aggregates
-        sumStepLength = 0f
-        stepCount = 0
-
-        return average
-    }
-
-    /**
-     * Reset PDR to initial state
-     */
+    /** Wipe all state. */
     fun resetPdr() {
-        _pdrPosition.postValue(PdrPosition(0f, 0f, 0f))
-        elevation = 0f
-        _elevationData.postValue(0f)
-        currentFloor = 0
+        _pdrPosition.postValue(zeroPos())
+        _elevation.postValue(0f)
         _floorLevel.postValue(0)
-        setupIndex = 0
-        sumStepLength = 0f
-        stepCount = 0
+        _inElevator.postValue(false)
 
-        // Clear buffers
-        elevationBuffer.clear()
-        verticalAccelBuffer.clear()
-        horizontalAccelBuffer.clear()
-        initialElevationBuffer.fill(null)
+        relElevation = 0f
+        refElevation = 0f
+        setupIndex   = 0
+        stepSum      = 0f
+        stepCount    = 0
+
+        vertAccBuf.clear()
+        horiAccBuf.clear()
+        elevBuf.clear()
+        first3Elev.fill(null)
     }
 
-    /**
-     * Set reference position for PDR
-     */
-    fun setInitialPosition(x: Float, y: Float) {
-        val currentPos = _pdrPosition.value ?: PdrPosition(0f, 0f, 0f)
-        _pdrPosition.postValue(currentPos.copy(x = x, y = y))
-    }
+    /* ----- configuration helpers ----- */
 
-    /**
-     * Configuration methods
-     */
-    fun setStepLength(length: Float) {
-        stepLength = length
-    }
+    fun setInitialPosition(x: Float, y: Float) =
+        _pdrPosition.postValue((_pdrPosition.value ?: zeroPos()).copy(x = x, y = y))
 
-    fun useManualStepLength(useManual: Boolean) {
-        useManualStepLength = useManual
-    }
+    fun setManualStepLength(len: Float) { manualStepLen = len }
+    fun useManualStepLength(use: Boolean) { useManualStep = use }
+    fun setFloorHeight(heightMeters: Float) { floorHeight = heightMeters }
 
-    fun setFloorHeight(height: Int) {
-        floorHeight = height
+    /* ---------- internal ---------- */
+
+    private fun calculateStepLength(acc: List<Double>): Float {
+        val range = (acc.maxOrNull() ?: 0.0) - (acc.minOrNull() ?: 0.0)
+        if (range <= 0.0) return manualStepLen
+        val bounce = range.pow(0.25).toFloat()
+        return WEINBERG_K * bounce
     }
 }
 
-/**
- * A simple circular buffer implementation for sensor data processing
- */
-class CircularBuffer<T>(private val capacity: Int) {
-    private val buffer = ArrayList<T>(capacity)
+/* ------------------------------------------------------------ */
+private class CircularBuffer<T>(private val capacity: Int) {
+    private val buf = ArrayList<T>(capacity)
 
     fun add(item: T) {
-        if (buffer.size >= capacity) {
-            buffer.removeAt(0)
-        }
-        buffer.add(item)
+        if (buf.size == capacity) buf.removeAt(0)
+        buf.add(item)
     }
 
-    fun clear() {
-        buffer.clear()
-    }
-
-    fun isFull(): Boolean = buffer.size >= capacity
-
-    fun toList(): List<T> = buffer.toList()
+    fun clear() = buf.clear()
+    fun isFull() = buf.size == capacity
+    fun toList(): List<T> = buf.toList()
 }

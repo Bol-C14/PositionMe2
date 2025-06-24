@@ -88,8 +88,8 @@ class SensorFusionServiceImpl @Inject constructor(
     override val currentFloor: LiveData<Int> = _currentFloor
 
     // Elevation data
-    override val elevation: LiveData<Float> = pdrProcessor.elevationData
-    override val isInElevator: LiveData<Boolean> = pdrProcessor.isInElevator
+    override val elevation: LiveData<Float> = pdrProcessor.elevation
+    override val isInElevator: LiveData<Boolean> = pdrProcessor.inElevator
 
     // Sensor values
     private val acceleration = FloatArray(3)
@@ -105,6 +105,7 @@ class SensorFusionServiceImpl @Inject constructor(
     private var bootTime = SystemClock.uptimeMillis()
     private var stepCounter = 0
     private var accelMagnitude = 0f
+    private val accelMagnitudes = mutableListOf<Float>()
 
     // Last timestamp tracking
     private val lastEventTimestamps = HashMap<Int, Long>()
@@ -143,12 +144,20 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             // Simplified GNSS position update logic
-            Log.d(TAG, "GNSS position update: $latitude, $longitude (accuracy: $gnssAccuracy)")
+//            Log.d(TAG, "GNSS position update: $latitude, $longitude (accuracy: $gnssAccuracy)")
         }
 
         override fun onProviderEnabled(provider: String) {}
         override fun onProviderDisabled(provider: String) {}
     }
+
+    // Fallback for software step detection
+    private var useSoftwareStepDetection = false
+    private var lastAccelPeakTime = 0L
+    private var lastAccelValue = 0f
+    private var lastStepAccel = 0f
+    private val STEP_THRESHOLD = 10.5f // Tune as needed
+    private val STEP_MIN_TIME_MS = 300L
 
     init {
         // Initialize sensors
@@ -160,6 +169,8 @@ class SensorFusionServiceImpl @Inject constructor(
         linearAccelerationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
         pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
         stepDetectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        Log.d(TAG, "Step detector sensor: $stepDetectorSensor")
+        useSoftwareStepDetection = stepDetectorSensor == null
     }
 
     override fun startSensors() {
@@ -193,7 +204,12 @@ class SensorFusionServiceImpl @Inject constructor(
         }
 
         stepDetectorSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            val registered = sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+            Log.d(TAG, "Step detector listener registered: $registered")
+            useSoftwareStepDetection = !registered
+        } ?: run {
+            Log.w(TAG, "Step detector sensor not available on this device! Using software step detection.")
+            useSoftwareStepDetection = true
         }
 
         // Start location updates
@@ -247,7 +263,7 @@ class SensorFusionServiceImpl @Inject constructor(
     }
 
     override fun setStepLength(stepLength: Float) {
-        pdrProcessor.setStepLength(stepLength)
+        pdrProcessor.setManualStepLength(stepLength)
     }
 
     override fun useManualStepLength(useManual: Boolean) {
@@ -255,7 +271,7 @@ class SensorFusionServiceImpl @Inject constructor(
     }
 
     override fun setFloorHeight(heightMeters: Int) {
-        pdrProcessor.setFloorHeight(heightMeters)
+        pdrProcessor.setFloorHeight(heightMeters.toFloat())
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -275,6 +291,7 @@ class SensorFusionServiceImpl @Inject constructor(
 
         when (sensorType) {
             Sensor.TYPE_ACCELEROMETER -> {
+//                Log.i(TAG, "PDR_SENSOR: ACCELEROMETER event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, acceleration, 0, 3)
                 accelMagnitude = kotlin.math.sqrt(
                     acceleration[0] * acceleration[0] +
@@ -289,9 +306,51 @@ class SensorFusionServiceImpl @Inject constructor(
                         event.timestamp
                     )
                 )
+
+                // Buffer magnitude for PDR
+                accelMagnitudes.add(accelMagnitude)
+
+                // Temporarily disable software step detection
+//                if (useSoftwareStepDetection) {
+//                    val now = System.currentTimeMillis()
+//                    // Detect peak
+//                    if (accelMagnitude > STEP_THRESHOLD && lastAccelValue <= STEP_THRESHOLD && (now - lastAccelPeakTime) > STEP_MIN_TIME_MS) {
+//                        lastAccelPeakTime = now
+//                        lastStepAccel = accelMagnitude
+//                        Log.d(TAG, "Software step detected at $now, accelMagnitude=$accelMagnitude")
+//                        // Use same logic as hardware step detector
+//                        val stepTime = SystemClock.uptimeMillis() - bootTime
+//                        val headingRad = orientation[0]
+//                        val magnitudes = accelMagnitudes.toList()
+//                        val newPosition = pdrProcessor.updatePdrPosition(
+//                            stepTime,
+//                            magnitudes,
+//                            headingRad
+//                        )
+//                        accelMagnitudes.clear()
+//                        val latLng = CoordinateTransform.enuToGeodetic(
+//                            newPosition.x.toDouble(),
+//                            newPosition.y.toDouble(),
+//                            0.0,
+//                            refLat, refLon, refAlt
+//                        )
+//                        _currentLatLng.postValue(latLng)
+//                        stepCounter++
+//                        val stepData = StepData(
+//                            stepTime,
+//                            newPosition.stepLength,
+//                            headingRad,
+//                            stepCounter
+//                        )
+//                        _stepDetected.postValue(stepData)
+//                        Log.d(TAG, "Software StepData posted: $stepData")
+//                    }
+//                    lastAccelValue = accelMagnitude
+//                }
             }
 
             Sensor.TYPE_LINEAR_ACCELERATION -> {
+//                Log.i(TAG, "PDR_SENSOR: LINEAR_ACCELERATION event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, linearAcceleration, 0, 3)
                 _linearAccelerationData.postValue(
                     LinearAccelerationData(
@@ -304,6 +363,7 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_GRAVITY -> {
+//                Log.i(TAG, "PDR_SENSOR: GRAVITY event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, gravity, 0, 3)
                 _gravityData.postValue(
                     GravityData(
@@ -319,6 +379,7 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_GYROSCOPE -> {
+//                Log.i(TAG, "PDR_SENSOR: GYROSCOPE event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, angularVelocity, 0, 3)
                 _gyroscopeData.postValue(
                     GyroscopeData(
@@ -331,6 +392,7 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_MAGNETIC_FIELD -> {
+//                Log.i(TAG, "PDR_SENSOR: MAGNETIC_FIELD event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, magneticField, 0, 3)
                 _magnetometerData.postValue(
                     MagnetometerData(
@@ -343,6 +405,7 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_ROTATION_VECTOR -> {
+//                Log.i(TAG, "PDR_SENSOR: ROTATION_VECTOR event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 System.arraycopy(event.values, 0, rotation, 0, event.values.size.coerceAtMost(4))
                 _rotationVectorData.postValue(
                     RotationVectorData(
@@ -361,6 +424,7 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_PRESSURE -> {
+//                Log.i(TAG, "PDR_SENSOR: PRESSURE event: values=${event.values.joinToString()}, timestamp=${event.timestamp}")
                 pressure = event.values[0]
                 _pressureData.postValue(
                     PressureData(
@@ -381,26 +445,29 @@ class SensorFusionServiceImpl @Inject constructor(
             }
 
             Sensor.TYPE_STEP_DETECTOR -> {
-                val stepTime = SystemClock.uptimeMillis() - bootTime
+                Log.i(TAG, "PDR_SENSOR: STEP_DETECTOR event received: values=${event.values?.joinToString()}, timestamp=${event.timestamp}, currentTime=$currentTime, lastStepTime=$lastStepTime")
 
-                // Debounce step events (ignore if too close to previous step)
-                if (currentTime - lastStepTime < 200) {
-                    Log.d(TAG, "Ignoring step event, too soon after last step")
-                    return
-                }
+                // Temporarily comment out debounce logic
+//                if (currentTime - lastStepTime < 200) {
+//                    Log.d(TAG, "Ignoring step event, too soon after last step")
+//                    return
+//                }
 
                 lastStepTime = currentTime
 
-                // Process step if recording
                 // Get current orientation (heading)
                 val headingRad = orientation[0]
 
-                // Update PDR position
+                // Update PDR position using buffered magnitudes
+                val magnitudes = accelMagnitudes.toList()
+                Log.d(TAG, "Step detected: headingRad=$headingRad, accelMagnitudes=$magnitudes, stepTime=${SystemClock.uptimeMillis() - bootTime}, refLat=$refLat, refLon=$refLon, refAlt=$refAlt")
                 val newPosition = pdrProcessor.updatePdrPosition(
-                    stepTime,
-                    listOf(accelMagnitude),
+                    SystemClock.uptimeMillis() - bootTime,
+                    magnitudes,
                     headingRad
                 )
+                Log.d(TAG, "PDR updated: newPosition=$newPosition")
+                accelMagnitudes.clear()
 
                 // Convert ENU coordinates back to latitude/longitude
                 val latLng = CoordinateTransform.enuToGeodetic(
@@ -409,19 +476,21 @@ class SensorFusionServiceImpl @Inject constructor(
                     0.0,
                     refLat, refLon, refAlt
                 )
+                Log.d(TAG, "ENU to Geodetic: enu=(${newPosition.x},${newPosition.y}), latLng=$latLng, ref=($refLat,$refLon,$refAlt)")
 
                 // Update current LatLng
                 _currentLatLng.postValue(latLng)
 
                 // Create step event
+                stepCounter++
                 val stepData = StepData(
-                    stepTime,
+                    SystemClock.uptimeMillis() - bootTime,
                     newPosition.stepLength,
-                    headingRad
+                    headingRad,
+                    stepCounter
                 )
                 _stepDetected.postValue(stepData)
-
-                stepCounter++
+                Log.d(TAG, "StepData posted: $stepData")
                 Log.d(TAG, "Step detected: $stepCounter, heading: ${Math.toDegrees(headingRad.toDouble())}°")
             }
         }

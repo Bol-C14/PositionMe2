@@ -22,16 +22,29 @@ import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.maps.android.compose.*
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.livedata.observeAsState
+import com.example.positionme2.ui.map.marker.OptimizedMarkerRegistry
 
 @Composable
 fun MapView(
     mapEngine: MapEngine,
-    recordingService: RecordingService
+    recordingService: RecordingService,
+    sensorFusionService: com.example.positionme2.domain.sensor.SensorFusionService,
+    markerRegistry: OptimizedMarkerRegistry
 ) {
     val currentPosition by mapEngine.currentPosition.collectAsState()
     val trajectories by mapEngine.trajectories.collectAsState()
-    val regionsOfInterest by mapEngine.regionsOfInterest.collectAsState()
     val indoorMap by mapEngine.indoorMap.collectAsState()
+
+    // Efficiently collect static and dynamic markers separately
+    // Static markers are collected with lower frequency for better performance
+    val staticMarkers by markerRegistry.staticMarkers.collectAsState()
+
+    // Dynamic markers (positions) are collected with higher frequency
+    val dynamicMarkers by markerRegistry.dynamicMarkers.collectAsState()
+
+    // For debug overlay only
+    val pdrPosition by sensorFusionService.pdrPosition.observeAsState()
 
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(LatLng(40.7128, -74.0060), 10f)
@@ -44,25 +57,31 @@ fun MapView(
             cameraPositionState = cameraPositionState,
             uiSettings = MapUiSettings(zoomControlsEnabled = false)
         ) {
-            currentPosition?.let {
+            // Render static markers (less frequent updates)
+            staticMarkers.forEach { marker ->
                 Marker(
-                    state = MarkerState(position = LatLng(it.latitude, it.longitude)),
-                    title = "Current Position"
-                    // Default marker, custom icon can be added here if you provide a bitmap descriptor
+                    state = MarkerState(position = marker.position),
+                    title = marker.title,
+                    snippet = marker.snippet,
+                    icon = marker.icon,
+                    visible = marker.visible
+                )
+            }
+
+            // Render dynamic markers (frequent position updates)
+            dynamicMarkers.forEach { marker ->
+                Marker(
+                    state = MarkerState(position = marker.position),
+                    title = marker.title,
+                    snippet = marker.snippet,
+                    icon = marker.icon,
+                    visible = marker.visible
                 )
             }
 
             trajectories.forEach { trajectory ->
                 Polyline(
                     points = trajectory.points.map { LatLng(it.latitude, it.longitude) },
-                )
-            }
-
-            regionsOfInterest.forEach { roi ->
-                Marker(
-                    state = MarkerState(position = LatLng(roi.point.latitude, roi.point.longitude)),
-                    title = roi.name,
-                    snippet = roi.description
                 )
             }
 
@@ -82,6 +101,15 @@ fun MapView(
                     )
                 }
             }
+        }
+
+        // Show PDR XY as debug text overlay
+        pdrPosition?.let { pdr ->
+            androidx.compose.material3.Text(
+                text = "PDR XY: x=${pdr.x}, y=${pdr.y}",
+                color = Color.Blue,
+                modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
+            )
         }
 
         FloatingActionButton(

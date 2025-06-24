@@ -100,6 +100,9 @@ dependencies {
     // Hilt + Compose Navigation integration
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
+    // LiveData for Compose
+    implementation("androidx.compose.runtime:runtime-livedata:1.6.7")
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

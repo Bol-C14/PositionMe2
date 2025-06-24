@@ -2,7 +2,7 @@ package com.example.positionme2.ui.map.engine
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.location.Location
+import android.util.Log
 import androidx.lifecycle.Observer
 import com.example.positionme2.data.repository.IndoorMapRepository
 import com.example.positionme2.domain.model.PdrPosition
@@ -15,7 +15,6 @@ import com.google.android.gms.location.*
 import com.google.android.gms.location.LocationRequest.PRIORITY_HIGH_ACCURACY
 import com.google.android.gms.location.LocationRequest.Builder
 import com.google.android.gms.location.LocationServices
-import com.google.android.gms.maps.model.LatLng
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,11 +26,16 @@ import java.util.UUID
 import javax.inject.Inject
 import com.example.positionme2.utils.CoordinateTransform
 import com.example.positionme2.data.model.IndoorMap
+import com.example.positionme2.ui.map.engine.adapter.FusedPositionProvider
+import com.example.positionme2.ui.map.engine.adapter.GnssPositionProvider
+import com.example.positionme2.ui.map.engine.adapter.PdrPositionProvider
 
 class GoogleMapEngine @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val sensorFusionService: SensorFusionService,
-    private val indoorMapRepository: IndoorMapRepository
+    private val indoorMapRepository: IndoorMapRepository,
+    private val gnssPositionProvider: GnssPositionProvider,
+    private val pdrPositionProvider: PdrPositionProvider,
+    private val fusedPositionProvider: FusedPositionProvider
 ) : MapEngine {
     private val fusedLocationClient: FusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(context)
 
@@ -65,28 +69,29 @@ class GoogleMapEngine @Inject constructor(
         PositionType.FUSED to true
     )
 
-    // Location callback for GNSS updates
-    private val locationCallback = object : LocationCallback() {
-        override fun onLocationResult(result: LocationResult) {
-            val location: Location? = result.lastLocation
-            location?.let { updateGnssPosition(it) }
-        }
-    }
-
-    // Observers for PDR updates
-    private val pdrObserver = Observer<PdrPosition> { pdrPosition ->
-        updatePdrPosition(pdrPosition)
-    }
-
-    // Observer for current LatLng (usually from sensor fusion)
-    private val latLngObserver = Observer<LatLng> { latLng ->
-        updateFusedPosition(latLng)
-    }
-
     init {
-        // Set up observers for the SensorFusionService LiveData
-        sensorFusionService.pdrPosition.observeForever(pdrObserver)
-        sensorFusionService.currentLatLng.observeForever(latLngObserver)
+        coroutineScope.launch {
+            gnssPositionProvider.position.collect { point ->
+                if (positionTypeVisibility[PositionType.GNSS] == true) {
+                    _currentPosition.value = point
+                }
+            }
+        }
+        coroutineScope.launch {
+            pdrPositionProvider.position.collect { point ->
+                if (positionTypeVisibility[PositionType.PDR] == true) {
+                    _pdrPosition.value = point
+                    _currentPosition.value = point
+                }
+            }
+        }
+        coroutineScope.launch {
+            fusedPositionProvider.position.collect { point ->
+                if (positionTypeVisibility[PositionType.FUSED] == true) {
+                    _fusedPosition.value = point
+                }
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -94,66 +99,20 @@ class GoogleMapEngine @Inject constructor(
         if (isTracking) return
         isTracking = true
 
-        // Start GNSS location updates
-        val request = Builder(1000L)
-            .setPriority(PRIORITY_HIGH_ACCURACY)
-            .build()
-        fusedLocationClient.requestLocationUpdates(request, locationCallback, null)
-        fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
-            location?.let { updateGnssPosition(it) }
-        }
+        // Start location updates
+        gnssPositionProvider.start()
+        pdrPositionProvider.start()
+        fusedPositionProvider.start()
     }
 
     override fun stopTracking() {
         if (!isTracking) return
         isTracking = false
 
-        // Stop GNSS location updates
-        fusedLocationClient.removeLocationUpdates(locationCallback)
-    }
-
-    private fun updateGnssPosition(location: Location) {
-        if (positionTypeVisibility[PositionType.GNSS] == false) return
-
-        coroutineScope.launch {
-            _currentPosition.value = Point(
-                latitude = location.latitude,
-                longitude = location.longitude,
-                altitude = location.altitude,
-                timestamp = location.time
-            )
-        }
-    }
-
-    private fun updatePdrPosition(pdrPosition: PdrPosition) {
-        if (positionTypeVisibility[PositionType.PDR] == false) return
-
-        coroutineScope.launch {
-            // Convert ENU coordinates (relative) to a LatLng at origin reference
-            val latLng = CoordinateTransform.enuToGeodetic(
-                pdrPosition.x.toDouble(),
-                pdrPosition.y.toDouble(),
-                0.0,
-                0.0, 0.0, 0.0
-            )
-            _pdrPosition.value = Point(
-                latitude = latLng.latitude,
-                longitude = latLng.longitude,
-                timestamp = pdrPosition.timestamp
-            )
-        }
-    }
-
-    private fun updateFusedPosition(latLng: LatLng) {
-        if (positionTypeVisibility[PositionType.FUSED] == false) return
-
-        coroutineScope.launch {
-            _fusedPosition.value = Point(
-                latitude = latLng.latitude,
-                longitude = latLng.longitude,
-                timestamp = System.currentTimeMillis()
-            )
-        }
+        // Stop location updates
+        gnssPositionProvider.stop()
+        pdrPositionProvider.stop()
+        fusedPositionProvider.stop()
     }
 
     override fun addRegionOfInterest(point: Point, name: String, description: String) {
@@ -205,8 +164,6 @@ class GoogleMapEngine @Inject constructor(
 
     // Clean up observers when the engine is no longer used
     fun cleanup() {
-        sensorFusionService.pdrPosition.removeObserver(pdrObserver)
-        sensorFusionService.currentLatLng.removeObserver(latLngObserver)
     }
 
     override fun startRecording() {
