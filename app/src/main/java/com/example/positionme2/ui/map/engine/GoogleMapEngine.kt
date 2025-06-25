@@ -103,6 +103,9 @@ class GoogleMapEngine @Inject constructor(
         gnssPositionProvider.start()
         pdrPositionProvider.start()
         fusedPositionProvider.start()
+
+        // Automatically start recording trajectory when tracking starts
+        startRecording()
     }
 
     override fun stopTracking() {
