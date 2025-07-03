@@ -103,6 +103,9 @@ dependencies {
     // LiveData for Compose
     implementation("androidx.compose.runtime:runtime-livedata:1.6.7")
 
+    // JSON serialization
+    implementation("com.google.code.gson:gson:2.10.1")
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
@@ -112,4 +115,7 @@ dependencies {
 
     // Network for API communication - using basic Java libraries only
     implementation("org.json:json:20230618")
+
+    // Compose Material (classic)
+    implementation("androidx.compose.material:material:1.6.7")
 }

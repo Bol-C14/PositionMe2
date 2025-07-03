@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/navigation_explore"
+        android:icon="@drawable/baseline_explore_24"
+        android:title="Explore" />
+    <item
+        android:id="@+id/navigation_record"
+        android:icon="@drawable/outline_camera_roll_24"
+        android:title="Record" />
+    <item
+        android:id="@+id/navigation_replay"
+        android:icon="@drawable/outline_camera_roll_24"
+        android:title="Replay" />
+    <item
+        android:id="@+id/navigation_settings"
+        android:icon="@android:drawable/ic_menu_manage"
+        android:title="Settings" />
+</menu>
+

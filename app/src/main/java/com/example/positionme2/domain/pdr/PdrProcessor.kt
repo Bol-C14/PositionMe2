@@ -5,6 +5,7 @@ import android.hardware.SensorManager
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import com.example.positionme2.domain.model.PdrPosition
+import com.example.positionme2.utils.CoordinateTransform
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -60,6 +61,9 @@ class PdrProcessor @Inject constructor(
     private val _floorLevel = MutableLiveData(0)
     val floorLevel: LiveData<Int> get() = _floorLevel
 
+    private val _isInitialized = MutableLiveData(false)
+    val isInitialized: LiveData<Boolean> get() = _isInitialized
+
     /* ---------- state ---------- */
 
     private var useManualStep = false
@@ -73,12 +77,71 @@ class PdrProcessor @Inject constructor(
     private var stepSum   = 0f
     private var stepCount = 0
 
+    // GPS reference point for coordinate transformation
+    private var gpsReferencePoint: CoordinateTransform.GpsCoordinate? = null
+    private var pdrInitialized = false
+
     private val vertAccBuf = CircularBuffer<Float>(ACCEL_BUF_SIZE)
     private val horiAccBuf = CircularBuffer<Float>(ACCEL_BUF_SIZE)
     private val elevBuf    = CircularBuffer<Float>(ELEVATION_BUF_SIZE)
     private val first3Elev = arrayOfNulls<Float>(3)
 
     /* ---------- public API ---------- */
+
+    /**
+     * Initialize PDR with GPS starting position
+     */
+    fun initializeWithGps(gpsCoordinate: CoordinateTransform.GpsCoordinate) {
+        if (!pdrInitialized) {
+            gpsReferencePoint = gpsCoordinate
+            // Starting position is (0,0) in local ENU coordinates since this is our reference
+            _pdrPosition.postValue(zeroPos())
+            pdrInitialized = true
+            _isInitialized.postValue(true)
+        }
+    }
+
+    /**
+     * Initialize PDR with manual coordinates (fallback method)
+     */
+    fun initializeWithManualPosition(x: Float, y: Float, referenceGps: CoordinateTransform.GpsCoordinate? = null) {
+        gpsReferencePoint = referenceGps
+        _pdrPosition.postValue((_pdrPosition.value ?: zeroPos()).copy(x = x, y = y))
+        pdrInitialized = true
+        _isInitialized.postValue(true)
+    }
+
+    /**
+     * Get current position in GPS coordinates
+     */
+    fun getCurrentGpsPosition(): CoordinateTransform.GpsCoordinate? {
+        val currentPos = _pdrPosition.value
+        val reference = gpsReferencePoint
+
+        return if (currentPos != null && reference != null) {
+            val enuCoord = CoordinateTransform.EnuCoordinate(
+                east = currentPos.x.toDouble(),
+                north = currentPos.y.toDouble(),
+                up = 0.0
+            )
+            CoordinateTransform.enuToGps(enuCoord, reference)
+        } else null
+    }
+
+    /**
+     * Update PDR position from GPS coordinates (for correction/recalibration)
+     */
+    fun updateFromGps(gpsCoordinate: CoordinateTransform.GpsCoordinate) {
+        val reference = gpsReferencePoint
+        if (reference != null) {
+            val enuCoord = CoordinateTransform.gpsToEnu(gpsCoordinate, reference)
+            val current = _pdrPosition.value ?: zeroPos()
+            _pdrPosition.postValue(current.copy(
+                x = enuCoord.east.toFloat(),
+                y = enuCoord.north.toFloat()
+            ))
+        }
+    }
 
     /**
      * Call when *one* hardware step is detected.
@@ -88,6 +151,11 @@ class PdrProcessor @Inject constructor(
         accelMagn: List<Float>,
         headingRad: Float
     ): PdrPosition {
+
+        if (!pdrInitialized) {
+            // Return current position without updating if not initialized
+            return _pdrPosition.value ?: zeroPos()
+        }
 
         if (accelMagn.size < MIN_REQUIRED_SAMPLES)
             return _pdrPosition.value ?: zeroPos()
@@ -180,12 +248,15 @@ class PdrProcessor @Inject constructor(
         _elevation.postValue(0f)
         _floorLevel.postValue(0)
         _inElevator.postValue(false)
+        _isInitialized.postValue(false)
 
         relElevation = 0f
         refElevation = 0f
         setupIndex   = 0
         stepSum      = 0f
         stepCount    = 0
+        pdrInitialized = false
+        gpsReferencePoint = null
 
         vertAccBuf.clear()
         horiAccBuf.clear()

@@ -25,12 +25,15 @@ import javax.inject.Singleton
 @Singleton
 class SensorFusionServiceImpl @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val pdrProcessor: PdrProcessor
+    private val pdrProcessor: PdrProcessor,
+    private val locationService: LocationService
 ) : SensorFusionService, SensorEventListener {
 
     companion object {
         private const val TAG = "SensorFusion"
         private const val LARGE_GAP_THRESHOLD_MS = 500L
+        private const val GPS_PDR_SYNC_INTERVAL_MS = 30000L // 30 seconds
+        private const val GPS_ACCURACY_THRESHOLD = 15.0f // 15 meters
     }
 
     // Sensor Manager
@@ -127,15 +130,24 @@ class SensorFusionServiceImpl @Inject constructor(
     private val _gnssData = MutableLiveData<GnssData>()
     override val gnssData: LiveData<GnssData> = _gnssData
 
-    // GNSS listener
+    // GNSS listener - ensure WGS84 compliance
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
-            latitude = location.latitude
-            longitude = location.longitude
-            altitude = location.altitude
+            // Convert Android Location to WGS84 GpsCoordinate
+            val gpsCoordinate = CoordinateTransform.fromAndroidLocation(location)
+
+            // Validate WGS84 coordinates
+            if (!CoordinateTransform.isValidWgs84(gpsCoordinate.latitude, gpsCoordinate.longitude)) {
+                Log.w(TAG, "Invalid WGS84 coordinates from location listener: ${gpsCoordinate.latitude}, ${gpsCoordinate.longitude}")
+                return
+            }
+
+            latitude = gpsCoordinate.latitude
+            longitude = gpsCoordinate.longitude
+            altitude = gpsCoordinate.altitude
             gnssAccuracy = location.accuracy
 
-            // Update LiveData
+            // Update LiveData with WGS84 coordinates
             _gnssData.postValue(GnssData(latitude, longitude, altitude, gnssAccuracy, System.currentTimeMillis()))
 
             // Update reference position if needed
@@ -143,8 +155,7 @@ class SensorFusionServiceImpl @Inject constructor(
                 setReferencePosition(latitude, longitude, altitude)
             }
 
-            // Simplified GNSS position update logic
-//            Log.d(TAG, "GNSS position update: $latitude, $longitude (accuracy: $gnssAccuracy)")
+            Log.d(TAG, "WGS84 GNSS position update: $latitude, $longitude (accuracy: $gnssAccuracy)")
         }
 
         override fun onProviderEnabled(provider: String) {}
@@ -159,7 +170,62 @@ class SensorFusionServiceImpl @Inject constructor(
     private val STEP_THRESHOLD = 10.5f // Tune as needed
     private val STEP_MIN_TIME_MS = 300L
 
+    // GPS-PDR synchronization
+    private var lastGpsPdrSyncTime = 0L
+    private var isPdrInitialized = false
+
     init {
+        // Initialize sensors
+        initializeSensors()
+
+        // Observe GPS location for PDR initialization and periodic correction
+        locationService.currentLocation.observeForever { gpsCoordinate ->
+            handleGpsUpdate(gpsCoordinate)
+        }
+
+        locationService.locationAccuracy.observeForever { accuracy ->
+            handleLocationAccuracyUpdate(accuracy)
+        }
+
+        // Observe PDR initialization status
+        pdrProcessor.isInitialized.observeForever { initialized ->
+            isPdrInitialized = initialized
+        }
+    }
+
+    private fun handleGpsUpdate(gpsCoordinate: CoordinateTransform.GpsCoordinate) {
+        val currentTime = System.currentTimeMillis()
+
+        if (!isPdrInitialized) {
+            // Initialize PDR with first good GPS fix
+            Log.d(TAG, "Initializing PDR with WGS84 GPS: lat=${gpsCoordinate.latitude}, lng=${gpsCoordinate.longitude}")
+            pdrProcessor.initializeWithGps(gpsCoordinate)
+            locationService.setReferencePoint(gpsCoordinate)
+            lastGpsPdrSyncTime = currentTime
+
+            // Update current LatLng for map display using WGS84-compliant conversion
+            _currentLatLng.postValue(CoordinateTransform.toLatLng(gpsCoordinate))
+        } else {
+            // Periodic GPS-PDR synchronization for drift correction
+            if (currentTime - lastGpsPdrSyncTime > GPS_PDR_SYNC_INTERVAL_MS) {
+                val accuracy = locationService.locationAccuracy.value ?: Float.MAX_VALUE
+                if (accuracy <= GPS_ACCURACY_THRESHOLD) {
+                    Log.d(TAG, "Correcting PDR drift with WGS84 GPS update")
+                    pdrProcessor.updateFromGps(gpsCoordinate)
+                    lastGpsPdrSyncTime = currentTime
+                }
+            }
+
+            // Always update the current GPS position for display using WGS84-compliant conversion
+            _currentLatLng.postValue(CoordinateTransform.toLatLng(gpsCoordinate))
+        }
+    }
+
+    private fun handleLocationAccuracyUpdate(accuracy: Float) {
+        Log.d(TAG, "GPS accuracy: ${accuracy}m")
+    }
+
+    private fun initializeSensors() {
         // Initialize sensors
         accelerometerSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroscopeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
@@ -248,18 +314,24 @@ class SensorFusionServiceImpl @Inject constructor(
     }
 
     override fun setReferencePosition(latitude: Double, longitude: Double, altitude: Double) {
+        // Validate WGS84 coordinates
+        if (!CoordinateTransform.isValidWgs84(latitude, longitude)) {
+            Log.e(TAG, "Invalid WGS84 coordinates for reference position: $latitude, $longitude")
+            return
+        }
+
         this.refLat = latitude
         this.refLon = longitude
         this.refAlt = altitude
 
-        Log.d(TAG, "Set reference position: $latitude, $longitude, $altitude")
+        Log.d(TAG, "Set WGS84 reference position: $latitude, $longitude, $altitude")
 
-        // If we're already recording, update the PDR position
-        val enuCoords = CoordinateTransform.geodeticToEnu(
-            latitude, longitude, altitude,
-            refLat, refLon, refAlt
-        )
-        pdrProcessor.setInitialPosition(enuCoords[0].toFloat(), enuCoords[1].toFloat())
+        // Convert to ENU coordinates using WGS84-compliant transformation
+        val referenceGps = CoordinateTransform.GpsCoordinate(refLat, refLon, refAlt)
+        val currentGps = CoordinateTransform.GpsCoordinate(latitude, longitude, altitude)
+        val enuCoords = CoordinateTransform.gpsToEnu(currentGps, referenceGps)
+
+        pdrProcessor.setInitialPosition(enuCoords.east.toFloat(), enuCoords.north.toFloat())
     }
 
     override fun setStepLength(stepLength: Float) {
@@ -447,12 +519,6 @@ class SensorFusionServiceImpl @Inject constructor(
             Sensor.TYPE_STEP_DETECTOR -> {
                 Log.i(TAG, "PDR_SENSOR: STEP_DETECTOR event received: values=${event.values?.joinToString()}, timestamp=${event.timestamp}, currentTime=$currentTime, lastStepTime=$lastStepTime")
 
-                // Temporarily comment out debounce logic
-//                if (currentTime - lastStepTime < 200) {
-//                    Log.d(TAG, "Ignoring step event, too soon after last step")
-//                    return
-//                }
-
                 lastStepTime = currentTime
 
                 // Get current orientation (heading)
@@ -460,7 +526,7 @@ class SensorFusionServiceImpl @Inject constructor(
 
                 // Update PDR position using buffered magnitudes
                 val magnitudes = accelMagnitudes.toList()
-                Log.d(TAG, "Step detected: headingRad=$headingRad, accelMagnitudes=$magnitudes, stepTime=${SystemClock.uptimeMillis() - bootTime}, refLat=$refLat, refLon=$refLon, refAlt=$refAlt")
+                Log.d(TAG, "Step detected: headingRad=$headingRad, accelMagnitudes=$magnitudes, stepTime=${SystemClock.uptimeMillis() - bootTime}")
                 val newPosition = pdrProcessor.updatePdrPosition(
                     SystemClock.uptimeMillis() - bootTime,
                     magnitudes,
@@ -469,14 +535,17 @@ class SensorFusionServiceImpl @Inject constructor(
                 Log.d(TAG, "PDR updated: newPosition=$newPosition")
                 accelMagnitudes.clear()
 
-                // Convert ENU coordinates back to latitude/longitude
-                val latLng = CoordinateTransform.enuToGeodetic(
-                    newPosition.x.toDouble(),
-                    newPosition.y.toDouble(),
-                    0.0,
-                    refLat, refLon, refAlt
+                // Convert ENU coordinates back to WGS84 latitude/longitude using proper transformation
+                val referenceGps = CoordinateTransform.GpsCoordinate(refLat, refLon, refAlt)
+                val enuCoord = CoordinateTransform.EnuCoordinate(
+                    east = newPosition.x.toDouble(),
+                    north = newPosition.y.toDouble(),
+                    up = 0.0
                 )
-                Log.d(TAG, "ENU to Geodetic: enu=(${newPosition.x},${newPosition.y}), latLng=$latLng, ref=($refLat,$refLon,$refAlt)")
+                val resultGps = CoordinateTransform.enuToGps(enuCoord, referenceGps)
+                val latLng = CoordinateTransform.toLatLng(resultGps)
+
+                Log.d(TAG, "WGS84 ENU to GPS: enu=(${newPosition.x},${newPosition.y}), gps=(${resultGps.latitude},${resultGps.longitude}), ref=($refLat,$refLon,$refAlt)")
 
                 // Update current LatLng
                 _currentLatLng.postValue(latLng)

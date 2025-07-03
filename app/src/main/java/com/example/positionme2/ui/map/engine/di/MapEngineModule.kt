@@ -4,9 +4,7 @@ import android.content.Context
 import com.example.positionme2.data.repository.IndoorMapRepository
 import com.example.positionme2.ui.map.engine.GoogleMapEngine
 import com.example.positionme2.ui.map.engine.MapEngine
-import com.example.positionme2.ui.map.engine.adapter.FusedPositionProvider
-import com.example.positionme2.ui.map.engine.adapter.GnssPositionProvider
-import com.example.positionme2.ui.map.engine.adapter.PdrPositionProvider
+import com.example.positionme2.ui.map.features.TrajectoryManager
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -23,16 +21,12 @@ object MapEngineModule {
     fun provideMapEngine(
         @ApplicationContext context: Context,
         indoorMapRepository: IndoorMapRepository,
-        gnssPositionProvider: GnssPositionProvider,
-        pdrPositionProvider: PdrPositionProvider,
-        fusedPositionProvider: FusedPositionProvider
+        trajectoryManager: TrajectoryManager
     ): MapEngine {
         return GoogleMapEngine(
             context = context,
             indoorMapRepository = indoorMapRepository,
-            gnssPositionProvider = gnssPositionProvider,
-            pdrPositionProvider = pdrPositionProvider,
-            fusedPositionProvider = fusedPositionProvider
+            trajectoryManager = trajectoryManager
         )
     }
 }

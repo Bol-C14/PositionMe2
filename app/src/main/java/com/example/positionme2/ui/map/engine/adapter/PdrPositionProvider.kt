@@ -3,8 +3,8 @@ package com.example.positionme2.ui.map.engine.adapter
 import androidx.lifecycle.Observer
 import com.example.positionme2.domain.model.PdrPosition
 import com.example.positionme2.domain.sensor.SensorFusionService
+import com.example.positionme2.domain.pdr.PdrProcessor
 import com.example.positionme2.ui.map.domain.Point
-import com.example.positionme2.utils.CoordinateTransform
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +15,8 @@ import javax.inject.Singleton
 
 @Singleton
 class PdrPositionProvider @Inject constructor(
-    private val sensorFusionService: SensorFusionService
+    private val sensorFusionService: SensorFusionService,
+    private val pdrProcessor: PdrProcessor
 ) : PositionProvider {
 
     private val _position = MutableStateFlow<Point?>(null)
@@ -37,18 +38,26 @@ class PdrPositionProvider @Inject constructor(
 
     private fun updatePdrPosition(pdrPosition: PdrPosition) {
         coroutineScope.launch {
-            // Convert ENU coordinates (relative) to a LatLng at origin reference
-            val latLng = CoordinateTransform.enuToGeodetic(
-                pdrPosition.x.toDouble(),
-                pdrPosition.y.toDouble(),
-                0.0,
-                0.0, 0.0, 0.0
-            )
-            _position.value = Point(
-                latitude = latLng.latitude,
-                longitude = latLng.longitude,
-                timestamp = pdrPosition.timestamp
-            )
+            // Get the current GPS position from PDR processor (which handles ENU to WGS84 conversion)
+            val gpsPosition = pdrProcessor.getCurrentGpsPosition()
+
+            if (gpsPosition != null) {
+                _position.value = Point(
+                    latitude = gpsPosition.latitude,
+                    longitude = gpsPosition.longitude,
+                    timestamp = pdrPosition.timestamp
+                )
+            } else {
+                // Fallback: if no GPS reference available, use current LatLng from sensor fusion service
+                val currentLatLng = sensorFusionService.currentLatLng.value
+                if (currentLatLng != null) {
+                    _position.value = Point(
+                        latitude = currentLatLng.latitude,
+                        longitude = currentLatLng.longitude,
+                        timestamp = pdrPosition.timestamp
+                    )
+                }
+            }
         }
     }
 }
